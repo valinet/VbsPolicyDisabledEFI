@@ -1,0 +1,145 @@
+From 99f41c4115cad0a2941a864cd034e0c4c2a07c79 Mon Sep 17 00:00:00 2001
+From: Valentin Radu <valentin.radu@valinet.ro>
+Date: Thu, 1 Aug 2024 11:00:56 +0300
+Subject: [PATCH] Only Disable VBS
+
+---
+ Application/Loader/Loader.c   | 14 +-------------
+ Application/Loader/Loader.inf |  1 -
+ EfiGuardDxe/EfiGuardDxe.c     |  9 +++++++++
+ EfiGuardDxe/EfiGuardDxe.h     |  8 ++++++++
+ EfiGuardDxe/PatchWinload.c    |  2 ++
+ EfiGuardDxe/util.h            |  1 +
+ 6 files changed, 21 insertions(+), 14 deletions(-)
+
+diff --git a/Application/Loader/Loader.c b/Application/Loader/Loader.c
+index 28a84e6..0f7c769 100644
+--- a/Application/Loader/Loader.c
++++ b/Application/Loader/Loader.c
+@@ -4,7 +4,6 @@
+ #include <Protocol/EfiGuard.h>
+ #include <Protocol/SimpleFileSystem.h>
+ #include <Protocol/LoadedImage.h>
+-#include <Protocol/LegacyBios.h>
+ #include <Library/PcdLib.h>
+ #include <Library/UefiLib.h>
+ #include <Library/DebugLib.h>
+@@ -554,18 +553,7 @@ TryBootOptionsInOrder(
+ 			Print(L"\r\nNOTE: EfiGuard does not support legacy (non-UEFI) Windows installations.\r\n"
+ 				L"The legacy OS will be booted, but EfiGuard will not work.\r\nPress any key to acknowledge...\r\n");
+ 			WaitForKey();
+-
+-			EFI_LEGACY_BIOS_PROTOCOL *LegacyBios;
+-			Status = gBS->LocateProtocol(&gEfiLegacyBiosProtocolGuid,
+-										NULL,
+-										(VOID**)&LegacyBios);
+-			ASSERT_EFI_ERROR(Status);
+-
+-			BootOptions[Index].Status = LegacyBios->LegacyBoot(LegacyBios,
+-															(BBS_BBS_DEVICE_PATH*)BootOptions[Index].FilePath,
+-															BootOptions[Index].OptionalDataSize,
+-															BootOptions[Index].OptionalData);
+-			return !EFI_ERROR(BootOptions[Index].Status);
++			return FALSE;
+ 		}
+ 
+ 		// Ensure the image path is connected end-to-end by Dispatch()ing any required drivers through DXE services
+diff --git a/Application/Loader/Loader.inf b/Application/Loader/Loader.inf
+index 0acb5f2..6b542e8 100644
+--- a/Application/Loader/Loader.inf
++++ b/Application/Loader/Loader.inf
+@@ -57,7 +57,6 @@
+   gEfiSimpleTextInProtocolGuid                     ## CONSUMES
+   gEfiSimpleTextInputExProtocolGuid                ## CONSUMES
+   gEfiSimpleTextOutProtocolGuid                    ## CONSUMES
+-  gEfiLegacyBiosProtocolGuid                       ## CONSUMES
+ 
+ [Pcd]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdResetOnMemoryTypeInformationChange    ## SOMETIMES_CONSUMES
+diff --git a/EfiGuardDxe/EfiGuardDxe.c b/EfiGuardDxe/EfiGuardDxe.c
+index a17b967..dfcb74a 100644
+--- a/EfiGuardDxe/EfiGuardDxe.c
++++ b/EfiGuardDxe/EfiGuardDxe.c
+@@ -483,6 +483,9 @@ EfiGuardUnload(
+ 	IN EFI_HANDLE ImageHandle
+ 	)
+ {
++#ifdef ONLY_DISABLE_VBS
++	return EFI_SUCCESS;
++#else
+ 	// Do not allow unload if we are at runtime, or if the Windows boot manager has been loaded
+ 	if (gEfiAtRuntime || gBootmgfwHandle != NULL)
+ 	{
+@@ -528,6 +531,7 @@ EfiGuardUnload(
+ 	}
+ 
+ 	return EFI_SUCCESS;
++#endif
+ }
+ 
+ // 
+@@ -541,6 +545,10 @@ EfiGuardInitialize(
+ 	)
+ {
+ 	ASSERT(ImageHandle == gImageHandle);
++#ifdef ONLY_DISABLE_VBS
++	ASSERT(gRT != NULL);
++	return DisableVbs();
++#else
+ 
+ 	// Check if we're not already loaded.
+ 	EFIGUARD_DRIVER_PROTOCOL* EfiGuardDriverProtocol;
+@@ -655,4 +663,5 @@ Exit:
+ 		EfiGuardUnload(gImageHandle);
+ 	}
+ 	return Status;
++#endif
+ }
+diff --git a/EfiGuardDxe/EfiGuardDxe.h b/EfiGuardDxe/EfiGuardDxe.h
+index e1e1d53..095f79f 100644
+--- a/EfiGuardDxe/EfiGuardDxe.h
++++ b/EfiGuardDxe/EfiGuardDxe.h
+@@ -20,6 +20,14 @@
+ extern "C" {
+ #endif
+ 
++#ifdef ONLY_DISABLE_VBS
++EFI_STATUS
++EFIAPI
++DisableVbs(
++	VOID
++	);
++#endif
++
+ //
+ // EfiGuard driver protocol handle
+ //
+diff --git a/EfiGuardDxe/PatchWinload.c b/EfiGuardDxe/PatchWinload.c
+index 0fbda68..09fb2f9 100644
+--- a/EfiGuardDxe/PatchWinload.c
++++ b/EfiGuardDxe/PatchWinload.c
+@@ -81,7 +81,9 @@ GetBootLoadedModule(
+ //
+ // Disables VBS for this boot
+ //
++#ifndef ONLY_DISABLE_VBS
+ STATIC
++#endif
+ EFI_STATUS
+ EFIAPI
+ DisableVbs(
+diff --git a/EfiGuardDxe/util.h b/EfiGuardDxe/util.h
+index bbdf4d1..80949e6 100644
+--- a/EfiGuardDxe/util.h
++++ b/EfiGuardDxe/util.h
+@@ -14,6 +14,7 @@
+ #define EFER_LMA		((UINTN)0x00000400) // Long Mode Active
+ #define EFER_UAIE		((UINTN)0x00100000) // Upper Address Ignore Enabled
+ 
++#define ONLY_DISABLE_VBS
+ 
+ //
+ // Waits for a timer event for N milliseconds.
+-- 
+2.42.0.windows.2
+
